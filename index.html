@@ -587,7 +587,7 @@ function openSpeakerModal(idx) {
   if (speakers.length === 0) return;
   modalPcIdx = idx;
   const pc = pcs[idx];
-  $modalTitle.textContent = `${pc.name} のボイス変更`;
+  $modalTitle.textContent = `${pc.name} のボイス甶更`;
   $modalBox.style.borderColor = pc.color + "44";
 
   $modalList.innerHTML = "";
@@ -606,7 +606,7 @@ function openSpeakerModal(idx) {
       `;
       btn.addEventListener("click", () => {
         pcs[modalPcIdx].speakerId = st.id;
-        pcs[modalPcIdx].speakerName = `${sp.name}（${st.name}）`;
+        pcs[modalPcIdx].speakerName = `${sp.name~（${st.name}）`;
         closeSpeakerModal();
         renderTabs();
         updatePlaceholder();
@@ -648,16 +648,14 @@ $input.addEventListener("input", () => {
   updateSendBtn();
 });
 
-// Enter2回で送信（IME変換確定との誤爆防止）
+// Enter確定→Enter送信（IME変換確定との誤爆防止）
 let lastEnterTime = 0;
 $input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     if (e.isComposing) return; // IME変換中は無視
+    e.preventDefault(); // 常に改行を防止
     const now = Date.now();
     if (now - lastEnterTime < 500) {
-      e.preventDefault();
-      // 1回目のEnterで入った改行を消して送信
-      if ($input.value.endsWith("\n")) $input.value = $input.value.slice(0, -1);
       sendMessage();
       lastEnterTime = 0;
     } else {
