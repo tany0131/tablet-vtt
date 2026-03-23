@@ -197,6 +197,686 @@
       <span class="header-sub" id="room-display"></span>
     </div>
     <div class="header-right">
+      <button id="copy-room-btn" class="copy-room-btn" title="ルームリンクをコピー">🔗</button>
+      <div id="status" class="header-status checking">
+        <span id="status-icon">⏳</span>
+        <span id="status-text">確認中…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat -->
+  <div id="chat" class="chat-area">
+    <div class="empty-state" id="empty-state">
+      <span class="icon">🎙️</span>
+      <span>テキストを入力すると、声で読み上げられます</span>
+    </div>
+  </div>
+
+  <!-- Playing Banner (hidden by default) -->
+  <div id="playing-banner" class="playing-banner" style="display:none;"></div>
+
+  <!-- PC Tabs -->
+  <div class="pc-tabs" id="pc-tabs"></div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <textarea id="input" rows="1" placeholder=""></textarea>
+    <button id="send-btn" class="send-btn">↑</button>
+  </div>
+</div>
+
+<!-- Speaker Modal -->
+<div id="modal-overlay" class="modal-overlay" style="display:none;">
+  <div class="modal-box" id="modal-box">
+    <div class="modal-title" id="modal-title"></div>
+    <div class="modal-hint">タップで選択</div>
+    <div id="modal-list"></div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+
+<script>
+// ─── Firebase Config ─────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyAOcS6gkFCisCEXauAZ-u_Ri8CF4TyGwh4",
+  authDomain: "tablet-vtt.firebaseapp.com",
+  databaseURL: "https://tablet-vtt-default-rtdb.firebaseio.com",
+  projectId: "tablet-vtt",
+  storageBucket: "tablet-vtt.firebasestorage.app",
+  messagingSenderId: "871095760668",
+  appId: "1:871095760668:web:94e0a55256de00d7f12cd9",
+  measurementId: "G-T4EP3WFC2Q"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// ─── State ───────────────────────────────────────────────────────
+const VOICEVOX = "http://localhost:50021";
+
+let pcs = [
+  { name: "KP", speakerId: 2, speakerName: "四国めたん", color: "#f472b6", icon: "📖" },
+  { name: "霧島 蓮", speakerId: 3, speakerName: "ずんだもん", color: "#4ade80", icon: "🎲" },
+  { name: "柊 夜明", speakerId: 13, speakerName: "青山龍星", color: "#60a5fa", icon: "🎲" },
+];
+
+let activePcIdx = 0;
+let messages = [];
+let voicevoxOk = false;
+let speakers = [];
+let playingMsgId = null;
+let audioQueue = [];
+let isPlaying = false;
+let modalPcIdx = null;
+let myUserId = null;
+let roomId = null;
+let renderedFirebaseKeys = new Set();
+
+// ─── DOM refs ────────────────────────────────────────────────────
+const $chat = document.getElementById("chat");
+const $empty = document.getElementById("empty-state");
+const $tabs = document.getElementById("pc-tabs");
+const $input = document.getElementById("input");
+const $sendBtn = document.getElementById("send-btn");
+const $status = document.getElementById("status");
+const $statusIcon = document.getElementById("status-icon");
+const $statusText = document.getElementById("status-text");
+const $banner = document.getElementById("playing-banner");
+const $modalOverlay = document.getElementById("modal-overlay");
+const $modalBox = document.getElementById("modal-box");
+const $modalTitle = document.getElementById("modal-title");
+const $modalList = document.getElementById("modal-list");
+const $roomDisplay = document.getElementById("room-display");
+const $copyRoomBtn = document.getElementById("copy-room-btn");
+
+// ─── Room & User Setup ───────────────────────────────────────────
+function initRoom() {
+  // Generate unique user ID
+  myUserId = "user-" + Math.random().toString(36).substr(2, 16);
+
+  // Extract or create room ID from URL hash
+  if (location.hash && location.hash.startsWith("#room-")) {
+    roomId = location.hash.substring(1); // Remove #
+  } else {
+    roomId = "room-" + Math.random().toString(36).substr(2, 8);
+    location.hash = roomId;
+  }
+
+  // Display room ID in header
+  $roomDisplay.textContent = roomId;
+  $roomDisplay.style.color = "#666";
+  $roomDisplay.style.fontSize = "11px";
+
+  // Copy room link button
+  $copyRoomBtn.addEventListener("click", () => {
+    const fullUrl = window.location.href;
+    navigator.clipboard.writeText(fullUrl).then(() => {
+      showToast("ルームリンクをコピーしました");
+    }).catch(() => {
+      showToast("コピーに失敗しました");
+    });
+  });
+}
+
+function showToast(message) {
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = "toastSlideIn 0.3s ease-out reverse";
+    setTimeout(() => toast.remove(), 300);
+  }, 2000);
+}
+
+// ─── Waveform HTML ───────────────────────────────────────────────
+function waveformHTML(color, small) {
+  const n = small ? 4 : 5;
+  const cls = small ? "small" : "normal";
+  let html = `<div class="waveform ${cls}">`;
+  for (let i = 0; i < n; i++) {
+    html += `<div class="wave-bar" style="background:${color};animation-delay:${i*0.12}s;height:60%"></div>`;
+  }
+  html += "</div>";
+  return html;
+}
+
+// ─── VOICEVOX connection ─────────────────────────────────────────
+async function checkVoicevox() {
+  try {
+    const res = await fetch(`${VOICEVOX}/speakers`);
+    if (!res.ok) throw new Error();
+    speakers = await res.json();
+    voicevoxOk = true;
+    $status.className = "header-status ok";
+    $statusIcon.textContent = "🟢";
+    $statusText.textContent = "VOICEVOX 接続中";
+  } catch {
+    voicevoxOk = false;
+    $status.className = "header-status ng";
+    $statusIcon.textContent = "🔴";
+    $statusText.textContent = "未接続";
+  }
+}
+
+// ─── Audio Queue ─────────────────────────────────────────────────
+async function processQueue() {
+  if (isPlaying || audioQueue.length === 0) return;
+  isPlaying = true;
+  const { msgId, text, speakerId } = audioQueue.shift();
+
+  setPlayingMsg(msgId);
+  try {
+    const qRes = await fetch(
+      `${VOICEVOX}/audio_query?text=${encodeURIComponent(text)}&speaker=${speakerId}`,
+      { method: "POST", headers: { "Content-Type": "application/json" } }
+    );
+    if (!qRes.ok) throw new Error("audio_query failed");
+    const query = await qRes.json();
+
+    const sRes = await fetch(
+      `${VOICEVOX}/synthesis?speaker=${speakerId}`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(query) }
+    );
+    if (!sRes.ok) throw new Error("synthesis failed");
+    const wavBuf = await sRes.arrayBuffer();
+
+    const blob = new Blob([wavBuf], { type: "audio/wav" });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    await new Promise(resolve => {
+      audio.onended = resolve;
+      audio.onerror = resolve;
+      audio.play().catch(resolve);
+    });
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error("VOICEVOX playback error:", e);
+  }
+
+  setPlayingMsg(null);
+  isPlaying = false;
+  processQueue();
+}
+
+function enqueueSpeech(msgId, text, speakerId) {
+  if (!voicevoxOk) return;
+  audioQueue.push({ msgId, text, speakerId });
+  processQueue();
+}
+
+// ─── Playing state ───────────────────────────────────────────────
+function setPlayingMsg(id) {
+  playingMsgId = id;
+  // Update bubble highlights
+  document.querySelectorAll(".bubble").forEach(el => {
+    const fbKey = el.dataset.fbKey;
+    const msg = messages.find(m => m.fbKey === fbKey);
+    if (!msg) return;
+    if (fbKey === id) {
+      el.style.borderColor = msg.color;
+      el.style.borderWidth = "1.5px";
+      const wf = el.querySelector(".waveform-slot");
+      if (wf) wf.innerHTML = waveformHTML(msg.color, true);
+    } else {
+      el.style.borderColor = "#1e2028";
+      el.style.borderWidth = "1px";
+      const wf = el.querySelector(".waveform-slot");
+      if (wf) wf.innerHTML = "";
+    }
+  });
+  // Banner
+  if (id) {
+    const msg = messages.find(m => m.fbKey === id);
+    if (msg) {
+      $banner.style.display = "flex";
+      $banner.style.borderColor = msg.color + "55";
+      $banner.innerHTML = `
+        ${waveformHTML(msg.color, true)}
+        <span class="pc-name" style="color:${msg.color}">${msg.icon} ${msg.pcName}</span>
+        <span class="cv">CV: ${msg.speakerName}</span>
+      `;
+    }
+  } else {
+    $banner.style.display = "none";
+  }
+}
+
+// ─── Render Messages ─────────────────────────────────────────────
+function addMessageToDOM(msg) {
+  $empty.style.display = "none";
+  const row = document.createElement("div");
+  row.className = `msg-row ${msg.isMine ? "mine" : "other"}`;
+
+  const label = document.createElement("div");
+  label.className = "msg-label";
+  label.style.color = msg.color;
+  label.style.paddingLeft = msg.isMine ? "0" : "4px";
+  label.style.paddingRight = msg.isMine ? "4px" : "0";
+  label.innerHTML = `<span>${msg.icon} ${msg.pcName}</span><span class="cv">CV: ${msg.speakerName}</span>`;
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.dataset.fbKey = msg.fbKey;
+  if (msg.isMine) {
+    bubble.style.background = msg.color + "15";
+  }
+
+  const textDiv = document.createElement("div");
+  textDiv.className = "bubble-text";
+  textDiv.textContent = msg.text;
+
+  const footer = document.createElement("div");
+  footer.className = "bubble-footer";
+
+  const wfSlot = document.createElement("span");
+  wfSlot.className = "waveform-slot";
+
+  const replayBtn = document.createElement("button");
+  replayBtn.className = "replay-btn";
+  replayBtn.textContent = "▶";
+  replayBtn.title = "再読み上げ";
+  replayBtn.addEventListener("click", () => enqueueSpeech(msg.fbKey, msg.text, msg.speakerId));
+  replayBtn.addEventListener("mouseenter", () => replayBtn.style.color = msg.color);
+  replayBtn.addEventListener("mouseleave", () => replayBtn.style.color = "#555");
+
+  footer.appendChild(wfSlot);
+  footer.appendChild(replayBtn);
+  bubble.appendChild(textDiv);
+  bubble.appendChild(footer);
+  row.appendChild(label);
+  row.appendChild(bubble);
+  $chat.appendChild(row);
+  $chat.scrollTop = $chat.scrollHeight;
+}
+
+// ─── Send ────────────────────────────────────────────────────────
+function sendMessage() {
+  const text = $input.value.trim();
+  if (!text || !roomId) return;
+
+  const pc = pcs[activePcIdx];
+  const msgData = {
+    text,
+    pcName: pc.name,
+    speakerId: pc.speakerId,
+    speakerName: pc.speakerName,
+    color: pc.color,
+    icon: pc.icon,
+    userId: myUserId,
+    timestamp: firebase.database.ServerValue.TIMESTAMP
+  };
+
+  db.ref(`rooms/${roomId}/messages`).push(msgData).catch(e => {
+    console.error("Firebase push error:", e);
+    showToast("メッセージ送信に失敗しました");
+  });
+
+  $input.value = "";
+  $input.style.height = "auto";
+  updateSendBtn();
+}
+
+// ─── Firebase Sync ───────────────────────────────────────────────
+function setupFirebaseSync() {
+  if (!roomId) return;
+
+  showToast("Firebase 接続中…");
+
+  const messagesRef = db.ref(`rooms/${roomId}/messages`);
+  messagesRef.orderByChild("timestamp").on("child_added", (snapshot) => {
+    const fbKey = snapshot.key;
+
+    // Prevent duplicate rendering
+    if (renderedFirebaseKeys.has(fbKey)) return;
+    renderedFirebaseKeys.add(fbKey);
+
+    const data = snapshot.val();
+    const msg = {
+      fbKey,
+      text: data.text,
+      pcName: data.pcName,
+      speakerId: data.speakerId,
+      speakerName: data.speakerName,
+      color: data.color,
+      icon: data.icon,
+      isMine: data.userId === myUserId
+    };
+
+    messages.push(msg);
+    addMessageToDOM(msg);
+    enqueueSpeech(fbKey, msg.text, msg.speakerId);
+  }, (error) => {
+    console.error("Firebase sync error:", error);
+  });
+
+  showToast("接続完了");
+}
+
+// ─── PC Tabs ─────────────────────────────────────────────────────
+function renderTabs() {
+  $tabs.innerHTML = "";
+  pcs.forEach((pc, i) => {
+    const btn = document.createElement("button");
+    btn.className = `pc-tab ${i === activePcIdx ? "active" : ""}`;
+    if (i === activePcIdx) {
+      btn.style.borderColor = pc.color;
+      btn.style.borderWidth = "1.5px";
+      btn.style.background = pc.color + "18";
+      btn.style.color = pc.color;
+      btn.style.fontWeight = "600";
+    }
+    btn.innerHTML = `${pc.icon} ${pc.name}<span class="cv">CV:${pc.speakerName}</span>`;
+    btn.addEventListener("click", () => {
+      activePcIdx = i;
+      renderTabs();
+      updatePlaceholder();
+      updateSendBtn();
+    });
+    btn.addEventListener("dblclick", () => openSpeakerModal(i));
+    btn.addEventListener("contextmenu", (e) => { e.preventDefault(); openSpeakerModal(i); });
+    $tabs.appendChild(btn);
+  });
+}
+
+// ─── Speaker Modal ───────────────────────────────────────────────
+function openSpeakerModal(idx) {
+  if (speakers.length === 0) return;
+  modalPcIdx = idx;
+  const pc = pcs[idx];
+  $modalTitle.textContent = `${pc.name} のボイス変更`;
+  $modalBox.style.borderColor = pc.color + "44";
+
+  $modalList.innerHTML = "";
+  speakers.forEach(sp => {
+    sp.styles.forEach(st => {
+      const btn = document.createElement("button");
+      btn.className = "speaker-option";
+      if (st.id === pc.speakerId) {
+        btn.style.background = pc.color + "22";
+        btn.style.borderColor = pc.color;
+      }
+      btn.innerHTML = `
+        <span class="name" style="font-weight:${st.id === pc.speakerId ? 700 : 400}">${sp.name}</span>
+        <span class="style">${st.name}</span>
+        <span class="sid">id:${st.id}</span>
+      `;
+      btn.addEventListener("click", () => {
+        pcs[modalPcIdx].speakerId = st.id;
+        pcs[modalPcIdx].speakerName = `${sp.name}（${st.name}）`;
+        closeSpeakerModal();
+        renderTabs();
+        updatePlaceholder();
+      });
+      $modalList.appendChild(btn);
+    });
+  });
+
+  $modalOverlay.style.display = "flex";
+}
+
+function closeSpeakerModal() {
+  $modalOverlay.style.display = "none";
+  modalPcIdx = null;
+}
+
+$modalOverlay.addEventListener("click", (e) => {
+  if (e.target === $modalOverlay) closeSpeakerModal();
+});
+$modalBox.addEventListener("click", (e) => e.stopPropagation());
+
+// ─── Input Handling ──────────────────────────────────────────────
+function updatePlaceholder() {
+  const pc = pcs[activePcIdx];
+  $input.placeholder = `${pc.name}（CV: ${pc.speakerName}）として入力…`;
+}
+
+function updateSendBtn() {
+  const hasText = $input.value.trim().length > 0;
+  const pc = pcs[activePcIdx];
+  $sendBtn.style.background = hasText ? pc.color : "#1e2028";
+  $sendBtn.style.color = hasText ? "#0c0e14" : "#555";
+  $sendBtn.style.cursor = hasText ? "pointer" : "default";
+}
+
+$input.addEventListener("input", () => {
+  $input.style.height = "auto";
+  $input.style.height = Math.min($input.scrollHeight, 96) + "px";
+  updateSendBtn();
+});
+
+// Enter2回で送信（IME変換確定との誤爆防止）
+let lastEnterTime = 0;
+$input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    if (e.isComposing) return; // IME変換中は無視
+    const now = Date.now();
+    if (now - lastEnterTime < 500) {
+      e.preventDefault();
+      // 1回目のEnterで入った改行を消して送信
+      if ($input.value.endsWith("\n")) $input.value = $input.value.slice(0, -1);
+      sendMessage();
+      lastEnterTime = 0;
+    } else {
+      lastEnterTime = now;
+    }
+  }
+});
+
+$sendBtn.addEventListener("click", sendMessage);
+
+// ─── Init ────────────────────────────────────────────────────────
+initRoom();
+renderTabs();
+updatePlaceholder();
+updateSendBtn();
+checkVoicevox();
+setupFirebaseSync();
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tablet</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0c0e14; color: #e0e0e0;
+    font-family: 'Noto Sans JP', sans-serif;
+    height: 100vh; overflow: hidden;
+  }
+  #app {
+    max-width: 540px; margin: 0 auto; height: 100vh;
+    display: flex; flex-direction: column; position: relative; overflow: hidden;
+  }
+
+  /* Header */
+  .header {
+    padding: 12px 16px; display: flex; align-items: center;
+    justify-content: space-between; border-bottom: 1px solid #1a1c24; flex-shrink: 0;
+  }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  .header-logo { font-size: 18px; font-weight: 700; letter-spacing: 2px; color: #fff; }
+  .header-sub { font-size: 12px; color: #555; }
+  .header-right { display: flex; align-items: center; gap: 8px; }
+  .room-id-display { font-size: 11px; color: #666; }
+  .copy-room-btn {
+    background: none; border: none; color: #666; cursor: pointer;
+    font-size: 12px; padding: 4px 8px; border-radius: 4px;
+    transition: all 0.15s;
+  }
+  .copy-room-btn:hover { color: #aaa; background: #1e2028; }
+  .header-status { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+  .header-status.ok { color: #4ade80; }
+  .header-status.ng { color: #f87171; }
+  .header-status.checking { color: #888; }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #1a1c24ee; border-radius: 20px; padding: 8px 16px;
+    font-size: 12px; z-index: 50; animation: toastSlideIn 0.3s ease-out;
+    backdrop-filter: blur(8px); border: 1px solid #2a2c34;
+  }
+  @keyframes toastSlideIn {
+    from { opacity: 0; transform: translateX(-50%) translateY(20px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  }
+
+  /* Chat */
+  .chat-area {
+    flex: 1; overflow-y: auto; padding: 12px 12px 8px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .chat-area::-webkit-scrollbar { width: 4px; }
+  .chat-area::-webkit-scrollbar-track { background: transparent; }
+  .chat-area::-webkit-scrollbar-thumb { background: #2a2c34; border-radius: 2px; }
+
+  .empty-state {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 8px; color: #333; font-size: 13px;
+  }
+  .empty-state .icon { font-size: 28px; }
+
+  .msg-row { display: flex; flex-direction: column; animation: fadeIn 0.25s ease-out; }
+  .msg-row.mine { align-items: flex-end; }
+  .msg-row.other { align-items: flex-start; }
+
+  .msg-label {
+    font-size: 11px; margin-bottom: 3px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .msg-label .cv { color: #555; font-size: 10px; }
+
+  .bubble {
+    max-width: 82%; padding: 10px 14px;
+    border: 1px solid #1e2028; position: relative; transition: border 0.2s;
+  }
+  .msg-row.mine .bubble {
+    border-radius: 12px 12px 4px 12px;
+  }
+  .msg-row.other .bubble {
+    background: #16181f; border-radius: 12px 12px 12px 4px;
+  }
+  .bubble.playing { border-width: 1.5px; }
+  .bubble-text { font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
+  .bubble-footer {
+    display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px;
+  }
+  .replay-btn {
+    background: none; border: none; color: #555; cursor: pointer;
+    font-size: 12px; padding: 0; transition: color 0.15s;
+  }
+
+  /* Waveform */
+  .waveform { display: flex; align-items: center; gap: 2px; }
+  .waveform.small { height: 12px; }
+  .waveform.normal { height: 18px; }
+  .wave-bar {
+    border-radius: 1px;
+    animation: waveform 0.8s ease-in-out infinite alternate;
+  }
+  .waveform.small .wave-bar { width: 2px; }
+  .waveform.normal .wave-bar { width: 3px; }
+
+  /* Playing Banner */
+  .playing-banner {
+    position: absolute; bottom: 140px; left: 50%; transform: translateX(-50%);
+    background: #1a1c24ee; border-radius: 20px; padding: 6px 16px;
+    display: flex; align-items: center; gap: 8px;
+    animation: bannerIn 0.2s ease-out; z-index: 10;
+    backdrop-filter: blur(8px); font-size: 12px;
+  }
+  .playing-banner .pc-name { font-weight: 500; }
+  .playing-banner .cv { color: #666; }
+
+  /* PC Tabs */
+  .pc-tabs {
+    display: flex; gap: 4px; padding: 8px 12px 4px;
+    border-top: 1px solid #1a1c24; overflow-x: auto; flex-shrink: 0;
+  }
+  .pc-tab {
+    flex: 0 0 auto; padding: 6px 12px; border-radius: 8px;
+    border: 1px solid #1e2028; background: #12141a; color: #888;
+    cursor: pointer; font-size: 12px; white-space: nowrap;
+    transition: all 0.15s; font-weight: 400;
+    font-family: 'Noto Sans JP', sans-serif;
+  }
+  .pc-tab.active { font-weight: 600; }
+  .pc-tab .cv { font-size: 10px; color: #555; margin-left: 4px; }
+
+  /* Input */
+  .input-area {
+    padding: 8px 12px 16px; display: flex; gap: 8px;
+    align-items: flex-end; flex-shrink: 0;
+  }
+  .input-area textarea {
+    flex: 1; padding: 10px 14px; background: #12141a;
+    border: 1px solid #1e2028; border-radius: 10px;
+    color: #e0e0e0; font-size: 14px; resize: none;
+    line-height: 1.5; max-height: 96px;
+    font-family: 'Noto Sans JP', sans-serif;
+  }
+  .input-area textarea::placeholder { color: #555; }
+  .input-area textarea:focus { outline: none; border-color: #333; }
+  .send-btn {
+    width: 42px; height: 42px; border-radius: 10px; border: none;
+    font-size: 18px; display: flex; align-items: center; justify-content: center;
+    transition: all 0.2s; flex-shrink: 0; cursor: default;
+  }
+
+  /* Speaker Modal */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-box {
+    background: #1a1c24; border-radius: 12px; padding: 20px;
+    width: 90%; max-width: 420px; max-height: 70vh; overflow-y: auto;
+  }
+  .modal-title { font-size: 14px; color: #aaa; margin-bottom: 4px; }
+  .modal-hint { font-size: 12px; color: #666; margin-bottom: 16px; }
+  .speaker-option {
+    display: block; width: 100%; padding: 10px 14px; margin-bottom: 6px;
+    background: #12141a; border: 1px solid #2a2c34; border-radius: 8px;
+    color: #e0e0e0; text-align: left; cursor: pointer; font-size: 13px;
+    transition: all 0.15s; font-family: 'Noto Sans JP', sans-serif;
+  }
+  .speaker-option:hover { border-color: #555; }
+  .speaker-option .name { font-weight: 400; }
+  .speaker-option .style { color: #888; margin-left: 8px; }
+  .speaker-option .sid { color: #555; margin-left: 8px; font-size: 11px; }
+
+  @keyframes waveform {
+    0% { height: 20%; }
+    100% { height: 100%; }
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes bannerIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <span class="header-logo">Tablet</span>
+      <span class="header-sub" id="room-display"></span>
+    </div>
+    <div class="header-right">
       <button id="copy-room-btn" class="copy-room-btn" title="ã«ã¼ã ãªã³ã¯ãã³ãã¼">ð</button>
       <div id="status" class="header-status checking">
         <span id="status-icon">â³</span>
