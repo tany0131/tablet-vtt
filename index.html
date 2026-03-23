@@ -587,7 +587,7 @@ function openSpeakerModal(idx) {
   if (speakers.length === 0) return;
   modalPcIdx = idx;
   const pc = pcs[idx];
-  $modalTitle.textContent = `${pc.name} のボイス甶更`;
+  $modalTitle.textContent = `${pc.name} のボイス変更`;
   $modalBox.style.borderColor = pc.color + "44";
 
   $modalList.innerHTML = "";
@@ -606,7 +606,7 @@ function openSpeakerModal(idx) {
       `;
       btn.addEventListener("click", () => {
         pcs[modalPcIdx].speakerId = st.id;
-        pcs[modalPcIdx].speakerName = `${sp.name~（${st.name}）`;
+        pcs[modalPcIdx].speakerName = `${sp.name}（${st.name}）`;
         closeSpeakerModal();
         renderTabs();
         updatePlaceholder();
